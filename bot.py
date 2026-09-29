@@ -1,9 +1,18 @@
 import datetime
 import threading
 import os
+import asyncio
+import logging
 from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+# ─────────────── ЛОГИРОВАНИЕ ───────────────
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ─────────────── ВЕБ-СЕРВЕР ДЛЯ RENDER ───────────────
 web_app = Flask(__name__)
@@ -14,8 +23,6 @@ def health():
 # ─────────────────────────────────────────────────────
 
 # ─────────────── НАСТРОЙКИ ───────────────
-# Токен берётся из переменной окружения Render.
-# Локально (на своём ПК) можно вписать напрямую для теста.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "СЮДА_ВСТАВЬ_СВОЙ_ТОКЕН_ДЛЯ_ЛОКАЛЬНОГО_ТЕСТА")
 
 DAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
@@ -187,8 +194,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def run_bot():
-    """Запускает Telegram-бота в отдельном потоке."""
+async def run_bot_async():
+    """Асинхронно запускает Telegram-бота без управления сигналами."""
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     bot_app.add_handler(CommandHandler("start", start))
@@ -197,14 +204,33 @@ def run_bot():
     bot_app.add_handler(CommandHandler("week", send_week))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button))
     
-    print("Бот запущен...")
-    bot_app.run_polling()
+    # Инициализируем и запускаем приложение вручную
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling()
+    
+    logger.info("Бот запущен в фоновом режиме.")
+    
+    # Держим поток активным
+    await asyncio.Event().wait()
+
+
+def run_bot_thread():
+    """Обертка для запуска асинхронного бота в фоновом потоке."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_bot_async())
+    except Exception as e:
+        logger.error(f"Ошибка в потоке бота: {e}", exc_info=True)
 
 
 if __name__ == '__main__':
-    # Запускаем бота в фоновом потоке
-    threading.Thread(target=run_bot, daemon=True).start()
+    # Запускаем бота в отдельном daemon-потоке
+    bot_thread = threading.Thread(target=run_bot_thread, daemon=True)
+    bot_thread.start()
     
-    # Запускаем веб-сервер для Render
+    # Запускаем веб-сервер (главный поток)
     port = int(os.environ.get("PORT", 8080))
+    logger.info(f"Запуск Flask на порту {port}")
     web_app.run(host="0.0.0.0", port=port)
